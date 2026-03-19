@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>未来工作计划</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Arial', sans-serif;
+        }
+        
+        body {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+        }
+        
+        .slide {
+            width: 1920px;
+            height: 1080px;
+            background: radial-gradient(circle at 30% 50%, rgba(255,255,255,0.8) 0%, rgba(240,240,240,0.9) 100%);
+            padding: 80px;
+            display: flex;
+            flex-direction: column;
+            position: relative;
+            overflow: hidden;
+            box-shadow: 0 20px 50px rgba(0,0,0,0.1);
+        }
+        
+        .slide::before {
+            content: '';
+            position: absolute;
+            top: -50%;
+            right: -50%;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(45deg, rgba(100,149,237,0.1) 0%, transparent 50%);
+            transform: rotate(30deg);
+            z-index: -1;
+        }
+        
+        .header-container {
+            display: flex;
+            align-items: flex-start;
+            margin-bottom: 40px;
+        }
+        
+        .number {
+            font-size: 120px;
+            font-weight: bold;
+            color: rgba(70, 130, 180, 0.2);
+            margin-right: 40px;
+            line-height: 1;
+        }
+        
+        .title-container {
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .main-title {
+            font-size: 54px;
+            color: #333;
+            margin-bottom: 10px;
+            font-weight: bold;
+            background: linear-gradient(90deg, #4682B4, #5F9EA0);
+            -webkit-background-clip: text;
+            background-clip: text;
+            color: transparent;
+        }
+        
+        .sub-title {
+            font-size: 32px;
+            color: #666;
+            font-weight: 300;
+            letter-spacing: 1px;
+        }
+        
+        .content-container {
+            background: rgba(255,255,255,0.8);
+            border-radius: 20px;
+            padding: 60px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.05);
+            flex-grow: 1;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            border: 1px solid rgba(0,0,0,0.05);
+        }
+        
+        .content-container::before {
+            content: '';
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            width: 80%;
+            height: 80%;
+            background: radial-gradient(circle, rgba(100,149,237,0.05) 0%, transparent 70%);
+            transform: translate(-50%, -50%);
+            z-index: -1;
+        }
+    </style>
+</head>
+<body>
+    <div class="slide">
+        <div class="header-container">
+            <div id="b0_c0" data-json-id="b0_c0" class="number">04</div>
+            <div class="title-container">
+                <div id="b0_c1" data-json-id="b0_c1" class="main-title">未来工作计划</div>
+                <div id="b0_c2" data-json-id="b0_c2" class="sub-title">Future work planning</div>
+            </div>
+        </div>
+        <div class="content-container">
+            <!-- 内容区域可以添加具体工作计划 -->
+        </div>
+    </div>
+</body>
+</html>
+
+<!--
+Step1 布局结构分析:
+- Layout pattern: 垂直两栏布局（标题区+内容区）
+- Rows/Cols grouping: 标题区为水平排列（数字+文字垂直堆叠）
+- Alignment: 标题区左对齐，内容区居中
+- Spacing: 标题区与内容区有较大间距
+- Visual hierarchy: 主标题>数字>副标题
+-->

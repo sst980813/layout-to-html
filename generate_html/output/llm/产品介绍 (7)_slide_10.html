@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>现代幻灯片</title>
+    <style>
+        /* 基础样式重置 */
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Arial', sans-serif;
+        }
+        
+        /* 幻灯片容器 */
+        .slide {
+            width: 1920px;
+            height: 1080px;
+            margin: 0 auto;
+            background: radial-gradient(circle at 20% 50%, #4a6bff, #2a3b8f);
+            position: relative;
+            overflow: hidden;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            grid-template-rows: auto 1fr;
+            padding: 80px;
+            gap: 40px;
+        }
+        
+        /* 装饰元素 */
+        .slide::before {
+            content: '';
+            position: absolute;
+            top: -50%;
+            right: -30%;
+            width: 100%;
+            height: 200%;
+            background: radial-gradient(circle, rgba(255,255,255,0.1) 0%, transparent 70%);
+            z-index: 0;
+        }
+        
+        /* 主标题区域 */
+        .header {
+            grid-column: 1 / 3;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            z-index: 1;
+        }
+        
+        /* 内容卡片 */
+        .card {
+            background: rgba(255, 255, 255, 0.15);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            padding: 30px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            z-index: 1;
+        }
+        
+        /* 左侧内容区 */
+        .left-content {
+            display: flex;
+            flex-direction: column;
+            gap: 40px;
+        }
+        
+        /* 右侧内容区 */
+        .right-content {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+        
+        /* 标题样式 */
+        .title {
+            color: white;
+            font-size: 72px;
+            font-weight: 700;
+            text-shadow: 0 4px 10px rgba(0, 0, 0, 0.3);
+            background: linear-gradient(90deg, #ffffff, #d1d8ff);
+            -webkit-background-clip: text;
+            background-clip: text;
+            color: transparent;
+        }
+        
+        /* 副标题样式 */
+        .subtitle {
+            color: white;
+            font-size: 48px;
+            font-weight: 600;
+            margin-bottom: 20px;
+        }
+        
+        /* 正文样式 */
+        .content-text {
+            color: rgba(255, 255, 255, 0.9);
+            font-size: 24px;
+            line-height: 1.6;
+            margin-bottom: 15px;
+        }
+        
+        /* 数字标记 */
+        .number {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 60px;
+            height: 60px;
+            background: linear-gradient(135deg, #ff6b6b, #ff8e8e);
+            color: white;
+            font-size: 32px;
+            font-weight: bold;
+            border-radius: 50%;
+            margin-right: 15px;
+            box-shadow: 0 5px 15px rgba(255, 107, 107, 0.4);
+        }
+        
+        /* 项目功能卡片 */
+        .feature-card {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 15px;
+            padding: 25px;
+            border-left: 5px solid #4a6bff;
+        }
+        
+        .feature-title {
+            color: white;
+            font-size: 28px;
+            font-weight: 600;
+            margin-bottom: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="slide">
+        <!-- 头部区域 -->
+        <div class="header">
+            <h1 id="html_1" data-json-id="1" class="title">标题内容</h1>
+            <div id="html_0" data-json-id="0" class="feature-card">
+                <div class="feature-title">产品项目功能</div>
+            </div>
+        </div>
+        
+        <!-- 左侧内容区 -->
+        <div class="left-content">
+            <div class="card">
+                <div class="number">1</div>
+                <span id="html_3" data-json-id="3">1</span>
+            </div>
+            
+            <div class="card">
+                <div class="number">2</div>
+                <span id="html_4" data-json-id="4">2</span>
+            </div>
+            
+            <div class="card">
+                <div class="number">3</div>
+                <span id="html_5" data-json-id="5">3</span>
+            </div>
+            
+            <div class="card">
+                <div class="number">4</div>
+                <span id="html_6" data-json-id="6">4</span>
+            </div>
+        </div>
+        
+        <!-- 右侧内容区 -->
+        <div class="right-content card">
+            <h3 id="html_b2_c0" data-json-id="b2_c0" class="subtitle">请添加小标题</h3>
+            <p id="html_b2_c1" data-json-id="b2_c1" class="content-text">单击此处输入你的正文，文字是您思想的提炼，为了最终演示发布的良好效果，请尽量言简意赅的阐述观点。</p>
+            
+            <h3 id="html_b2_c2" data-json-id="b2_c2" class="subtitle">请添加小标题</h3>
+            <p id="html_b2_c3" data-json-id="b2_c3" class="content-text">单击此处输入你的正文，文字是您思想的提炼，为了最终演示发布的良好效果，请尽量言简意赅的阐述观点。</p>
+            
+            <h3 id="html_b2_c4" data-json-id="b2_c4" class="subtitle">请添加小标题</h3>
+            <p id="html_b2_c5" data-json-id="b2_c5" class="content-text">单击此处输入你的正文，文字是您思想的提炼，为了最终演示发布的良好效果，请尽量言简意赅的阐述观点。</p>
+            
+            <h3 id="html_b2_c6" data-json-id="b2_c6" class="subtitle">请添加小标题</h3>
+            <p id="html_b2_c7" data-json-id="b2_c7" class="content-text">单击此处输入你的正文，文字是您思想的提炼，为了最终演示发布的良好效果，请尽量言简意赅的阐述观点。</p>
+        </div>
+    </div>
+</body>
+</html>
+
+<!--
+Step1 布局结构分析:
+- Layout pattern: 网格布局 (2列)
+- Rows/Cols grouping: 顶部标题行 + 2列内容区
+- Alignment: 顶部标题左右对齐，内容区垂直堆叠
+- Spacing: 统一的内边距和间距系统
+- Visual hierarchy: 标题最大，副标题次之，正文最小
+-->
