@@ -6,6 +6,7 @@ import os
 import re
 import time
 import sys
+import math
 import statistics
 import textwrap
 from dataclasses import dataclass
@@ -109,6 +110,37 @@ _JS_EXTRACT_RECTS = r"""
     hasAnyContent,
     visibleText,
   };
+})()
+""".strip()
+
+
+_JS_SPACE_UTILIZATION = r"""
+(() => {
+  const W = 1920, H = 1080;
+  const COLS = 48, ROWS = 27;
+  const cellW = W / COLS, cellH = H / ROWS;
+  let occupied = 0;
+  const slide = document.querySelector('.slide') || document.body;
+  const slideRect = slide.getBoundingClientRect();
+
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const px = slideRect.left + (c + 0.5) * cellW;
+      const py = slideRect.top + (r + 0.5) * cellH;
+      const el = document.elementFromPoint(px, py);
+      if (!el || el === document.body || el === document.documentElement || el === slide) continue;
+      const cs = window.getComputedStyle(el);
+      if (!cs) continue;
+      const bg = cs.backgroundColor || '';
+      const bgImg = cs.backgroundImage || '';
+      const hasBg = (bg && bg !== 'rgba(0, 0, 0, 0)' && bg !== 'transparent');
+      const hasBgImg = (bgImg && bgImg !== 'none');
+      const hasText = (el.innerText || '').trim().length > 0;
+      const hasImg = el.tagName === 'IMG' || el.querySelector('img');
+      if (hasBg || hasBgImg || hasText || hasImg) occupied++;
+    }
+  }
+  return { occupied, total: COLS * ROWS, ratio: occupied / (COLS * ROWS) };
 })()
 """.strip()
 
@@ -237,6 +269,41 @@ def _rouge_l_f1(candidate_tokens: List[str], reference_tokens: List[str]) -> flo
     if rec + prec <= 0:
         return 0.0
     return 2.0 * rec * prec / (rec + prec)
+
+
+_CSS_RICH_PROPERTIES = [
+    r"linear-gradient", r"radial-gradient", r"conic-gradient",
+    r"box-shadow", r"text-shadow",
+    r"border-radius",
+    r"transform", r"transition", r"animation",
+    r"backdrop-filter", r"filter",
+    r"background-clip:\s*text",
+    r"opacity",
+    r"::before", r"::after",
+]
+
+
+def _css_richness_score(html_text: str) -> Tuple[float, Dict[str, Any]]:
+    """CSS richness: 0.4 * length_sigmoid + 0.6 * property_diversity."""
+    if not html_text:
+        return 0.0, {"css_len": 0, "rich_props_found": 0, "length_norm": 0.0, "diversity": 0.0}
+
+    style_blocks = re.findall(r"<style[^>]*>([\s\S]*?)</style>", html_text, re.IGNORECASE)
+    inline_styles = re.findall(r'style\s*=\s*"([^"]*)"', html_text, re.IGNORECASE)
+
+    all_css = " ".join(style_blocks + inline_styles)
+    css_len = len(all_css.strip())
+
+    length_norm = 1.0 / (1.0 + math.exp(-0.003 * (css_len - 2000)))
+
+    found = 0
+    for pat in _CSS_RICH_PROPERTIES:
+        if re.search(pat, all_css, re.IGNORECASE):
+            found += 1
+    diversity = found / len(_CSS_RICH_PROPERTIES)
+
+    score = 0.4 * length_norm + 0.6 * diversity
+    return float(score), {"css_len": css_len, "rich_props_found": found, "length_norm": length_norm, "diversity": diversity}
 
 
 _ID_CLEAN_RE = re.compile(r"[^a-zA-Z0-9\-_:.]+")
@@ -398,22 +465,23 @@ def _compute_html_execution_metrics(
     timeout_ms: int,
     tmp_html_path: Path,
     page_errors: List[str],
-) -> Tuple[bool, float, float, float, Dict[str, Any]]:
+) -> Tuple[bool, float, float, float, float, Dict[str, Any]]:
     """
     使用 Playwright 渲染并抽取指标：
-    返回 (valid, eiou_mean, dom_coverage, cr_mean, debug)
+    返回 (valid, eiou_mean, dom_coverage, cr_mean, space_util, debug)
     """
     # 写临时 html 文件供 page.goto
     tmp_html_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_html_path.write_text(html_text, encoding="utf-8", errors="replace")
 
     if not tmp_html_path.exists():
-        return False, 0.0, 0.0, 0.0, {"error": "missing_tmp_html"}
+        return False, 0.0, 0.0, 0.0, 0.0, {"error": "missing_tmp_html"}
 
     valid = True
     eiou_mean = 0.0
     dom_coverage = 0.0
     cr_mean = 0.0
+    space_util = 0.0
     debug: Dict[str, Any] = {}
 
     page_errors.clear()
@@ -449,7 +517,7 @@ def _compute_html_execution_metrics(
             dom_coverage = float(matched / total) if total > 0 else 0.0
             eiou_mean = float(statistics.mean(slide_eious)) if slide_eious else 0.0
 
-            # structure_validity（用文本保留 CR 做代理；你也可以替换为更“结构化”的 DOM 树相似度）
+            # structure_validity
             ref_elements = _ref_text_elements_from_slide(slide)
             element_f1s: List[float] = []
             for json_id, ref_elt in ref_elements:
@@ -458,6 +526,15 @@ def _compute_html_execution_metrics(
                 gen_tokens = _tokenize_zh(gen_elt)
                 element_f1s.append(_rouge_l_f1(gen_tokens, ref_tokens))
             cr_mean = float(statistics.mean(element_f1s)) if element_f1s else 0.0
+
+            # space utilization
+            try:
+                su: Dict[str, Any] = page.evaluate(_JS_SPACE_UTILIZATION)
+                space_util = float(su.get("ratio", 0.0))
+                debug["space_occupied"] = su.get("occupied", 0)
+                debug["space_total"] = su.get("total", 0)
+            except Exception:
+                space_util = 0.0
 
             debug.update(
                 {
@@ -476,7 +553,7 @@ def _compute_html_execution_metrics(
         valid = False
         debug["error"] = str(e)
 
-    return valid, eiou_mean, dom_coverage, cr_mean, debug
+    return valid, eiou_mean, dom_coverage, cr_mean, space_util, debug
 
 
 def score_html(
@@ -487,23 +564,29 @@ def score_html(
     timeout_ms: int,
     tmp_html_path: Path,
     page_errors: List[str],
-    w_layout: float = 0.4,
-    w_dom: float = 0.3,
-    w_struct: float = 0.2,
-    w_closure: float = 0.1,
+    w_layout: float = 0.45,
+    w_struct: float = 0.25,
+    w_css: float = 0.20,
+    w_closure: float = 0.10,
+    coverage_gate_exp: float = 1.5,
     closure_scorer: Optional[_TagClosureHeuristicScorer] = None,
 ) -> Tuple[float, Dict[str, Any]]:
     """
-    Execution-Guided Feedback Score：
-      score = 0.4 * layout_alignment
-            + 0.3 * dom_similarity
-            + 0.2 * structure_validity
-            + 0.1 * tag_closure
+    Dual-track scoring: score selects pairs, reward guides training.
+
+    score (correctness-oriented, for pair selection):
+      invalid -> 0
+      valid   -> coverage^a * (0.45*IoU + 0.25*text_f1 + 0.20*css + 0.10*closure)
+
+    reward (aesthetics-oriented, for training signal):
+      invalid -> -1
+      valid   -> 2 * coverage^a * (0.20*IoU + 0.10*text_f1 + 0.30*css + 0.30*space + 0.10*closure) - 1
     """
     closure_scorer = closure_scorer or _TagClosureHeuristicScorer()
     tag_closure, closure_debug = closure_scorer.score(html_text)
+    css_richness, css_debug = _css_richness_score(html_text)
 
-    valid, eiou_mean, dom_coverage, cr_mean, exec_debug = _compute_html_execution_metrics(
+    valid, eiou_mean, dom_coverage, cr_mean, space_util, exec_debug = _compute_html_execution_metrics(
         page=page,
         slide=slide,
         html_text=html_text,
@@ -512,31 +595,53 @@ def score_html(
         page_errors=page_errors,
     )
 
-    layout_alignment = float(eiou_mean)  # 默认区间 0..1
-    dom_similarity = float(dom_coverage)  # 匹配覆盖率 0..1
-    structure_validity = float(cr_mean)  # 以 CR（文本保留）代理 0..1
+    layout_alignment = float(eiou_mean)
+    dom_similarity = float(dom_coverage)
+    structure_validity = float(cr_mean)
 
-    score = (
-        w_layout * layout_alignment
-        + w_dom * dom_similarity
-        + w_struct * structure_validity
-        + w_closure * tag_closure
-    )
+    if not valid:
+        score = 0.0
+        reward = -1.0
+        quality = 0.0
+        aesthetic = 0.0
+        gate = 0.0
+    else:
+        gate = dom_similarity ** coverage_gate_exp
+
+        # score: correctness-oriented, for choosing pairs
+        quality = (
+            w_layout * layout_alignment
+            + w_struct * structure_validity
+            + w_css * css_richness
+            + w_closure * tag_closure
+        )
+        score = gate * quality
+
+        # reward: aesthetics-oriented, pushes richer styles + less whitespace
+        aesthetic = (
+            0.20 * layout_alignment
+            + 0.10 * structure_validity
+            + 0.30 * css_richness
+            + 0.30 * space_util
+            + 0.10 * tag_closure
+        )
+        reward = 2.0 * (gate * aesthetic) - 1.0
 
     metrics = {
         "valid_render": bool(valid),
         "layout_alignment": layout_alignment,
         "dom_similarity": dom_similarity,
         "structure_validity": structure_validity,
+        "css_richness": float(css_richness),
+        "css_debug": css_debug,
+        "space_util": float(space_util),
         "tag_closure": float(tag_closure),
         "closure_debug": closure_debug,
         "exec_debug": exec_debug,
-        # 训练奖励可选（对 invalid 做惩罚）
-        "reward": float(
-            0.5 * layout_alignment
-            + 0.3 * structure_validity
-            + 0.2 * ((0.0 if valid else -1.0))
-        ),
+        "coverage_gate": float(gate),
+        "quality": float(quality),
+        "aesthetic": float(aesthetic),
+        "reward": float(reward),
     }
     return float(score), metrics
 
@@ -788,10 +893,11 @@ def main() -> int:
     ap.add_argument("--top-p", type=float, default=0.9, help="top-p（默认 0.9）")
     ap.add_argument("--max-new-tokens", type=int, default=4096, help="最大生成 token（默认 700）")
 
-    ap.add_argument("--w-layout", type=float, default=0.4, help="score 分量：layout_alignment 权重（默认 0.4）")
-    ap.add_argument("--w-dom", type=float, default=0.3, help="score 分量：dom_similarity 权重（默认 0.3）")
-    ap.add_argument("--w-struct", type=float, default=0.2, help="score 分量：structure_validity 权重（默认 0.2）")
-    ap.add_argument("--w-closure", type=float, default=0.1, help="score 分量：tag_closure 权重（默认 0.1）")
+    ap.add_argument("--w-layout", type=float, default=0.45, help="score: layout_alignment weight (default 0.45)")
+    ap.add_argument("--w-struct", type=float, default=0.25, help="score: structure_validity weight (default 0.25)")
+    ap.add_argument("--w-css", type=float, default=0.20, help="score: css_richness weight (default 0.20)")
+    ap.add_argument("--w-closure", type=float, default=0.10, help="score: tag_closure weight (default 0.10)")
+    ap.add_argument("--coverage-gate-exp", type=float, default=1.5, help="coverage gate exponent (default 1.5)")
 
     ap.add_argument("--epsilon", type=float, default=1e-9, help="chosen 与 rejected 分数差小于该值时跳过（默认 1e-9）")
     ap.add_argument("--rejected-strategy", default="worst", choices=["worst", "random-worst"], help="rejected 选择策略（默认 worst）")
@@ -808,7 +914,7 @@ def main() -> int:
         f"  timeout_ms={args.timeout_ms}\n"
         f"  mlx_model_path={args.local_model_path or _get_local_model_path_by_env() or ''}\n"
         f"  sampling: temperature={args.temperature} top_p={args.top_p} max_new_tokens={args.max_new_tokens}\n"
-        f"  score_weights: w_layout={args.w_layout} w_dom={args.w_dom} w_struct={args.w_struct} w_closure={args.w_closure}\n",
+        f"  score_weights: w_layout={args.w_layout} w_struct={args.w_struct} w_css={args.w_css} w_closure={args.w_closure} gate_exp={args.coverage_gate_exp}\n",
         flush=True,
     )
 
@@ -914,9 +1020,10 @@ def main() -> int:
                         tmp_html_path=tmp_html_path,
                         page_errors=page_errors,
                         w_layout=args.w_layout,
-                        w_dom=args.w_dom,
                         w_struct=args.w_struct,
+                        w_css=args.w_css,
                         w_closure=args.w_closure,
+                        coverage_gate_exp=args.coverage_gate_exp,
                         closure_scorer=closure_scorer,
                     )
                     dt = time.time() - t0
@@ -930,9 +1037,11 @@ def main() -> int:
                     )
                     print(
                         f"[score] slide_id={slide_id} cand={j+1}/{len(candidates_html)} score={score:.4f} "
-                        f"layout={metrics.get('layout_alignment', 0.0):.4f} dom={metrics.get('dom_similarity', 0.0):.4f} "
-                        f"struct={metrics.get('structure_validity', 0.0):.4f} closure={metrics.get('tag_closure', 0.0):.4f} "
-                        f"sec={dt:.2f}",
+                        f"layout={metrics.get('layout_alignment', 0.0):.4f} coverage={metrics.get('dom_similarity', 0.0):.4f} "
+                        f"gate={metrics.get('coverage_gate', 0.0):.4f} struct={metrics.get('structure_validity', 0.0):.4f} "
+                        f"css={metrics.get('css_richness', 0.0):.4f} space={metrics.get('space_util', 0.0):.4f} "
+                        f"closure={metrics.get('tag_closure', 0.0):.4f} "
+                        f"aesthetic={metrics.get('aesthetic', 0.0):.4f} reward={metrics.get('reward', 0.0):.4f} sec={dt:.2f}",
                         flush=True,
                     )
 
