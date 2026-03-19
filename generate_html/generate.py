@@ -250,7 +250,7 @@ def _openai_rewrite_html(blocks: List[Dict[str, Any]], *, stream_to_stdout: bool
     if openai is None:
         raise RuntimeError("检测到 LLM_API_KEY/OPENAI_API_KEY，但未安装 openai。请先 `pip install openai`。")
 
-    model = os.getenv("LLM_MODEL", "deepseek-v3")
+    model = os.getenv("LLM_MODEL", "deepseek-v3.2")
     base_url = os.getenv("LLM_BASE_URL", "https://cloud.infini-ai.com/maas/v1")
     llm_client = openai.OpenAI(api_key=api_key or "not-needed", base_url=base_url)
 
@@ -436,9 +436,9 @@ def main() -> int:
         indices = [args.slide_index]
 
     llm_enabled = True
-    rule_dir = out_dir / "rule"
+    # rule_dir = out_dir / "rule"
     llm_dir = out_dir / "llm"
-    rule_dir.mkdir(parents=True, exist_ok=True)
+    # rule_dir.mkdir(parents=True, exist_ok=True)
     if llm_enabled:
         llm_dir.mkdir(parents=True, exist_ok=True)
     for i in indices:
@@ -446,9 +446,9 @@ def main() -> int:
         slide_id = str(slide.get("slide_id") or "").strip()
         name = _sanitize_filename(slide_id) if slide_id else f"{prefix}_{i:04d}"
         blocks = _blocks_from_slide(slide)
-        base_html = blocks_to_base_html(blocks)
-        out_path = rule_dir / f"{name}.html"
-        out_path.write_text(base_html, encoding="utf-8")
+        # base_html = blocks_to_base_html(blocks)
+        # out_path = rule_dir / f"{name}.html"
+        # out_path.write_text(base_html, encoding="utf-8")
 
         if llm_enabled:
             llm_html = _openai_rewrite_html(blocks, stream_to_stdout=True)
