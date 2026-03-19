@@ -1,10 +1,11 @@
 import argparse
 import json
-import math
 import statistics
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+import jieba
 
 
 try:
@@ -84,35 +85,13 @@ def _iou(a: Rect, b: Rect) -> float:
     return float(inter / union)
 
 
-def _lcs_len(a: str, b: str) -> int:
+def _ref_text_elements_from_slide(slide: Dict[str, Any]) -> List[Tuple[str, str]]:
     """
-    只计算 LCS 长度（字符级），用 O(min(n,m)) 内存。
+    返回 (json_id, ref_text) 列表，用于按 id 与 HTML 中同 id 元素的文本匹配后算 ROUGE-L。
+    - 有 children：kind=="text" 的 (ch.id, content)
+    - 无 children：(block.id, text_content)
     """
-    if not a or not b:
-        return 0
-    if len(a) < len(b):
-        short, long = a, b
-    else:
-        short, long = b, a
-    prev = [0] * (len(short) + 1)
-    for ch in long:
-        cur = [0]
-        for j, sj in enumerate(short, start=1):
-            if ch == sj:
-                cur.append(prev[j - 1] + 1)
-            else:
-                cur.append(max(prev[j], cur[j - 1]))
-        prev = cur
-    return prev[-1]
-
-
-def _ref_text_from_slide(slide: Dict[str, Any]) -> str:
-    """
-    参考文本：来自布局 JSON 的可见文本字段。
-    - children: kind=="text" 的 content
-    - 无 children: block.text_content
-    """
-    parts: List[str] = []
+    out: List[Tuple[str, str]] = []
     for b in slide.get("blocks") or []:
         children = b.get("children") or []
         if children:
@@ -120,12 +99,61 @@ def _ref_text_from_slide(slide: Dict[str, Any]) -> str:
                 if str(ch.get("kind") or "").lower() == "text":
                     t = str(ch.get("content") or "")
                     if t.strip():
-                        parts.append(t)
+                        json_id = "" if ch.get("id") is None else str(ch.get("id"))
+                        out.append((json_id, t))
         else:
             t = str(b.get("text_content") or "")
             if t.strip():
-                parts.append(t)
-    return "\n".join(parts).strip()
+                json_id = "" if b.get("id") is None else str(b.get("id"))
+                out.append((json_id, t))
+    return out
+
+
+def _tokenize_jieba(s: str) -> List[str]:
+    """用 jieba 分词，返回 token 列表。"""
+    if not s or not s.strip():
+        return []
+    return list(jieba.cut(s.strip()))
+
+
+def _lcs_len_tokens(a_tokens: List[str], b_tokens: List[str]) -> int:
+    """
+    LCS 长度（token 序列），O(min(n,m)) 空间。
+    """
+    if not a_tokens or not b_tokens:
+        return 0
+    if len(a_tokens) < len(b_tokens):
+        short, long = a_tokens, b_tokens
+    else:
+        short, long = b_tokens, a_tokens
+    prev = [0] * (len(short) + 1)
+    for tok in long:
+        cur = [0]
+        for j, sj in enumerate(short, start=1):
+            if tok == sj:
+                cur.append(prev[j - 1] + 1)
+            else:
+                cur.append(max(prev[j], cur[j - 1]))
+        prev = cur
+    return prev[-1]
+
+
+def _rouge_l_f1(candidate_tokens: List[str], reference_tokens: List[str]) -> float:
+    """
+    ROUGE-L F1：candidate 为生成文本 token 序列，reference 为参考 token 序列。
+    Recall = LCS/len(reference), Precision = LCS/len(candidate), F1 = 2*P*R/(P+R)。
+    空参考或空候选时返回 0。
+    """
+    if not reference_tokens:
+        return 0.0
+    lcs = _lcs_len_tokens(candidate_tokens, reference_tokens)
+    if lcs == 0:
+        return 0.0
+    rec = lcs / len(reference_tokens)
+    prec = lcs / len(candidate_tokens) if candidate_tokens else 0.0
+    if rec + prec <= 0:
+        return 0.0
+    return 2.0 * rec * prec / (rec + prec)
 
 
 def _sanitize_filename(s: str) -> str:
@@ -163,6 +191,7 @@ _JS_EXTRACT_RECTS = r"""
     return true;
   }
 
+  const textById = {};
   for (const el of nodes) {
     const id = (el.getAttribute('data-json-id') ?? el.getAttribute('data-block-id') ?? '').toString();
     if (!id) continue;
@@ -174,6 +203,7 @@ _JS_EXTRACT_RECTS = r"""
       w: r.width,
       h: r.height,
     };
+    textById[id] = (el.innerText || el.textContent || '').trim();
   }
 
   const body = document.body;
@@ -185,6 +215,7 @@ _JS_EXTRACT_RECTS = r"""
 
   return {
     rectsById: out,
+    textById,
     hasMain,
     hasAnyContent,
     visibleText,
@@ -278,11 +309,17 @@ def main() -> int:
 
             vr_flags.append(valid)
 
-            # CR：用 body.innerText 与参考文本做 LCS 覆盖率（以参考为分母）
-            ref_text = _ref_text_from_slide(slide)
-            gen_text = str(extract.get("visibleText") or "").strip()
-            lcs = _lcs_len(gen_text, ref_text)
-            cr = float(lcs / max(1, len(ref_text)))
+            # CR：按 id 匹配，每个 text 元素取参考 (json_id, ref_text) 与 HTML 中同 id 元素的文本 gen_text 算 ROUGE-L，再对该页所有元素取平均；总分为所有存在 HTML 的页的 ROUGE-L 平均
+            ref_elements = _ref_text_elements_from_slide(slide)  # List[(json_id, ref_text)]
+            text_by_id = extract.get("textById") or {}
+            element_rouge_l: List[float] = []
+            for json_id, ref_elt in ref_elements:
+                gen_elt = str(text_by_id.get(json_id) or "").strip()
+                ref_tokens = _tokenize_jieba(ref_elt)
+                gen_tokens = _tokenize_jieba(gen_elt)
+                element_rouge_l.append(_rouge_l_f1(gen_tokens, ref_tokens))
+                # print(element_rouge_l)
+            cr = float(statistics.mean(element_rouge_l)) if element_rouge_l else 1
             cr_scores.append(cr)
 
             # EIoU：按 id 匹配 target bbox 与渲染 bbox
@@ -319,6 +356,7 @@ def main() -> int:
 
     vr = float(sum(vr_flags) / max(1, len(vr_flags)))
     eiou = float(statistics.mean(all_eious)) if all_eious else 0.0
+    print(cr_scores)
     cr_mean = float(statistics.mean(cr_scores)) if cr_scores else 0.0
 
     summary = {
