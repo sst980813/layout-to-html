@@ -42,7 +42,7 @@ $$\{h_i^{(1)}, h_i^{(2)}, \ldots, h_i^{(N)}\} \sim \pi_\theta(\cdot \mid p(s_i))
 
 ## 4.3 基于执行反馈的多维评估指标体系
 
-本方法设计了六个互补的评估维度，从不同角度衡量生成HTML的质量。这些指标的计算均依赖于Playwright无头浏览器的实际渲染结果，而非对HTML源代码的静态分析。以下逐一阐述各指标的定义与计算方法。
+本方法设计了七个互补的评估维度，从不同角度衡量生成HTML的质量。这些指标的计算均依赖于Playwright无头浏览器的实际渲染结果，而非对HTML源代码的静态分析。以下逐一阐述各指标的定义与计算方法。
 
 ### 4.3.1 渲染有效性（Render Validity）
 
@@ -104,3 +104,163 @@ $$\text{ROUGE-L}_{F1} = \frac{2 \cdot R_{lcs} \cdot P_{lcs}}{R_{lcs} + P_{lcs}}$
 $$\text{StructValidity} = \frac{1}{|E_{text}|} \sum_{k \in E_{text}} \text{ROUGE-L}_{F1}(\mathbf{c}_k, \mathbf{r}_k)$$
 
 LCS的计算采用 $O(\min(m, n))$ 空间复杂度的动态规划算法，避免在长文本场景下的内存开销。
+
+### 4.3.5 样式丰富度（CSS Richness）
+
+样式丰富度用于衡量候选HTML在视觉表达上的多样性与复杂度。与布局对齐度、文本保留度等“内容正确性”指标不同，该指标关注生成结果是否具备充分的样式设计能力。
+
+具体地，本方法从HTML中的CSS代码中提取两类统计量：
+
+（1）样式长度归一化分数：以CSS字符长度衡量样式信息量，并进行归一化；
+
+（2）属性多样性分数：统计关键样式属性集合（如颜色、阴影、渐变、滤镜、边框、动画、变换等）在候选中的覆盖比例。
+
+设长度归一化分数为 $s_{\text{len}}$，属性多样性分数为 $s_{\text{div}}$，则样式丰富度定义为：
+
+$$\text{CSSRich} = 0.4 \cdot s_{\text{len}} + 0.6 \cdot s_{\text{div}}$$
+
+其中更高的属性多样性权重用于鼓励“有效样式”而非单纯冗长代码。该指标取值范围为 $[0,1]$。
+
+### 4.3.6 空间利用率（Space Utilization）
+
+空间利用率用于衡量页面在1920×1080画布上的有效占用程度，反映候选是否存在大面积留白、布局过于稀疏等问题。该指标由页面注入脚本计算元素占用面积占比并进行归一化，记为：
+
+$$\text{SpaceUtil} \in [0,1]$$
+
+该指标不直接参与偏好对选择的 `score`，而是主要作用于训练阶段的 `reward`，用于引导模型生成更饱满、可读性更高的版式。
+
+### 4.3.7 标签闭合完备度（Tag Closure）
+
+标签闭合完备度衡量HTML结构的语法健壮性。实践中，语言模型生成的长HTML容易出现标签遗漏闭合、嵌套错位等问题，这类问题可能不立即触发运行时报错，但会降低后续渲染稳定性。
+
+本方法采用轻量级启发式检测器，对常见成对标签的开闭匹配情况进行统计，得到完备度分数：
+
+$$\text{TagClosure} \in [0,1]$$
+
+该指标在 `score` 和 `reward` 中均作为辅助项，避免模型通过“视觉投机”获得高分而忽略代码结构质量。
+
+## 4.4 双轨评分体系：Score与Reward的解耦设计
+
+EGPO采用双轨评分体系：`score` 用于偏好对选择（chosen/rejected），`reward` 用于训练信号构造。两者共享同一组执行反馈指标，但优化侧重点不同。
+
+首先，定义DOM覆盖率门控因子：
+
+$$g = \text{DOMCoverage}^{\alpha}, \quad \alpha=1.5$$
+
+其中指数 $\alpha$ 控制覆盖率惩罚强度，默认取1.5以强化“元素缺失”惩罚。
+
+### 4.4.1 用于偏好对选择的Score
+
+若渲染无效（`valid_render=False`），则直接置：
+
+$$\text{Score}=0$$
+
+若渲染有效，则先计算正确性导向质量项：
+
+$$Q = w_l \cdot \text{LayoutAlign} + w_s \cdot \text{StructValidity} + w_c \cdot \text{CSSRich} + w_t \cdot \text{TagClosure}$$
+
+其中默认权重为：
+
+$$w_l=0.45,\; w_s=0.25,\; w_c=0.20,\; w_t=0.10$$
+
+最终用于排序选择的分数为：
+
+$$\text{Score} = g \cdot Q$$
+
+该设计强调布局还原与文本一致性，保证chosen样本在“任务正确性”维度上显著优于rejected样本。
+
+### 4.4.2 用于训练引导的Reward
+
+若渲染无效，则置：
+
+$$\text{Reward}=-1$$
+
+若渲染有效，则计算美学导向项：
+
+$$A = 0.20 \cdot \text{LayoutAlign} + 0.10 \cdot \text{StructValidity} + 0.30 \cdot \text{CSSRich} + 0.30 \cdot \text{SpaceUtil} + 0.10 \cdot \text{TagClosure}$$
+
+并映射到 $[-1,1]$ 区间：
+
+$$\text{Reward} = 2 \cdot (g \cdot A) - 1$$
+
+可以看到，`reward` 相比 `score` 提高了样式丰富度与空间利用率的权重，体现“在保证可执行和对齐的前提下，进一步优化视觉表现力”的训练目标。
+
+## 4.5 偏好对构建策略
+
+对于每个输入幻灯片 $s_i$ 的候选集合 $\{h_i^{(j)}\}_{j=1}^N$，首先计算每个候选的 `score` 与 `reward`。随后按 `score` 降序排序，选择最高分样本作为chosen：
+
+$$h_i^+ = \arg\max_j \text{Score}(h_i^{(j)})$$
+
+rejected样本采用“最差样本策略”（worst）：
+
+$$h_i^- = \arg\min_j \text{Score}(h_i^{(j)})$$
+
+若两者分数差小于阈值 $\epsilon$（默认 $10^{-9}$），则该样本对被跳过，避免引入弱偏好或噪声偏好。最终构造DPO训练三元组：
+
+$$\big(p(s_i),\; h_i^+,\; h_i^-\big)$$
+
+其中 $p(s_i)$ 为输入prompt。
+
+## 4.6 DPO训练目标与优化过程
+
+在得到偏好数据集 $\mathcal{D}=\{(x,y_w,y_l)\}$ 后，采用DPO目标对策略模型 $\pi_\theta$ 进行优化。设参考模型为 $\pi_{\text{ref}}$，则单样本损失定义为：
+
+$$
+\mathcal{L}_{\text{DPO}}(\theta)=
+-\log \sigma \left(
+\beta \left[
+\log \frac{\pi_\theta(y_w|x)}{\pi_\theta(y_l|x)}
+-\log \frac{\pi_{\text{ref}}(y_w|x)}{\pi_{\text{ref}}(y_l|x)}
+\right]
+\right)
+$$
+
+其中 $\sigma(\cdot)$ 为Sigmoid函数，$\beta$ 为偏好强度系数。本文默认 $\beta=0.1$。该目标本质上鼓励策略模型在相对意义上提升chosen相对rejected的条件概率，并通过参考模型项抑制策略偏移过大。
+
+训练实现采用 `trl.DPOTrainer`，并结合LoRA进行参数高效微调。参考模型由Trainer在PEFT模式下自动处理，无需额外维护独立可训练副本。
+
+## 4.7 关键超参数设置
+
+为保证实验可复现性，本文默认参数如下。
+
+### 4.7.1 候选生成与执行评估参数
+
+| 参数 | 默认值 | 说明 |
+|---|---:|---|
+| `num_candidates` | 4 | 每个样本生成候选数 $N$ |
+| `temperature` | 0.7 | 候选采样温度 |
+| `top_p` | 0.9 | nucleus sampling截断阈值 |
+| `max_new_tokens` | 4096 | 单候选最大生成长度 |
+| `timeout_ms` | 80000 | 单候选Playwright渲染超时 |
+| `coverage_gate_exp` | 1.5 | DOM覆盖率门控指数 $\alpha$ |
+| `epsilon` | $10^{-9}$ | 偏好对最小分差阈值 |
+| `rejected_strategy` | `worst` | rejected选择策略 |
+
+### 4.7.2 Score权重参数
+
+| 参数 | 默认值 |
+|---|---:|
+| `w_layout` | 0.45 |
+| `w_struct` | 0.25 |
+| `w_css` | 0.20 |
+| `w_closure` | 0.10 |
+
+### 4.7.3 DPO与LoRA训练参数
+
+| 参数 | 默认值 | 说明 |
+|---|---:|---|
+| `num_epochs` | 3 | 训练轮数 |
+| `lr` | 5e-6 | 学习率 |
+| `batch_size` | 2 | 单卡batch size |
+| `grad_accum` | 8 | 梯度累积步数 |
+| `max_length` | 4096 | 序列最大长度 |
+| `max_prompt_length` | 2048 | prompt最大长度 |
+| `beta` | 0.1 | DPO偏好强度系数 |
+| `warmup_ratio` | 0.1 | 学习率预热比例 |
+| `lr_scheduler_type` | `cosine` | 学习率调度策略 |
+| `lora_r` | 16 | LoRA秩 |
+| `lora_alpha` | 32 | LoRA缩放系数 |
+| `lora_dropout` | 0.05 | LoRA dropout |
+| `lora_target_modules` | `q_proj,v_proj,k_proj,o_proj,gate_proj,up_proj,down_proj` | LoRA注入模块 |
+
+上述参数在默认设置下能够在“可执行性、结构还原度与视觉表现力”之间取得稳定平衡。后续章节实验部分将进一步通过消融实验验证各参数及各指标权重对最终性能的影响。
