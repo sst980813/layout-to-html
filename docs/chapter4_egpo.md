@@ -28,15 +28,191 @@ $$\{h_i^{(1)}, h_i^{(2)}, \ldots, h_i^{(N)}\} \sim \pi_\theta(\cdot \mid p(s_i))
 
 其中 $p(s_i)$ 为根据幻灯片 $s_i$ 的blocks数据构造的提示文本（prompt）。
 
-提示文本的设计遵循四步流程范式，引导模型依次完成布局结构感知、现代CSS布局实现、配色方案设计和装饰元素添加。提示中包含以下硬性约束：
+提示文本的设计遵循四步流程范式（step-by-step的结构化规划），在生成HTML前先引导模型完成布局结构感知、现代CSS布局实现、配色方案设计与装饰元素规划。该分阶段机制在实现上可视为“思维链式”的提示工程变体：先决策、后代码；在候选提取阶段，我们仅保留完整HTML片段，中间规划文本不进入后续训练。
+
+为提升模型对输入结构的解析稳定性，本方法在候选生成前引入“双视图输入表征”：其一为层次化XML结构，其二为元素数组。两者来源于同一份 `blocks` 数据，但承担不同功能：
+
+（1）XML视图：强调父子层次、语义分组与结构边界，用于引导模型理解页面组织方式；
+
+（2）元素数组视图：强调元素级几何与内容字段，用于提供快速检索的布局参考信息。
+
+### 4.2.1 XML结构转换方法
+
+设输入幻灯片为 $s_i$，其原始结构为 `blocks` 列表。我们构造一个结构化XML文档：
+
+$$X_i = \mathcal{T}_{xml}(s_i)$$
+
+其中根节点包含画布信息（1920×1080），中间层保持 `block`，叶子层保持 `children`。对于每个 `block` 节点，保留如下字段：`id,type,x,y,width,height`；对于每个 `child` 节点，保留如下字段：`id,kind,x,y,width,height` 以及可选语义字段（如 `content,image_path,semantic_level,font_size`）。
+
+该转换遵循“结构保真”原则：不重排节点顺序、不推断缺失字段、不改写原始id，仅做可逆的格式映射。因此，XML视图与原始JSON在语义上保持一一对应。
+
+为便于工程复现，XML转换采用如下规范化模板：
+
+```xml
+<layout_reference>
+  <canvas width="1920" height="1080" />
+  <blocks>
+    <block id="..." type="..." x="..." y="..." width="..." height="...">
+      <children>
+        <node id="..." kind="text|image|..." x="..." y="..." width="..." height="..." ...>...</node>
+      </children>
+      <!-- 或者在无 children 时保留 block 级内容 -->
+      <text>...</text>
+      <image src="..." />
+    </block>
+  </blocks>
+</layout_reference>
+```
+
+其中 `<canvas>` 作为全局坐标系基准，`<block>` 保留语义分组，`<node>` 保留可渲染叶子元素。该结构既保留父子关系，也保留后续布局所需的几何信息。
+
+### 4.2.2 XML元素映射机制（核心）
+
+本节给出从输入数据到XML，再到最终DOM的完整映射链路。设输入为 `blocks`，转换后的XML为 $X_i$，模型生成HTML后可观测DOM集合为 $D_i$。映射流程为：
+
+$$\text{blocks} \xrightarrow{\mathcal{T}_{xml}} X_i \xrightarrow{\text{prompt+LLM}} \text{HTML} \xrightarrow{\text{browser}} D_i$$
+
+#### （一）JSON到XML的节点级映射
+
+1. **容器层映射（block级）**  
+对每个 `block_j`，生成一个 `<block_j>` 节点，并复制以下属性：
+
+$$
+\phi_b(block_j)=\langle id,type,x,y,width,height\rangle
+$$
+
+即：
+
+- `block.id -> <block id="...">`
+- `block.type -> <block type="...">`
+- `block.(x,y,width,height) -> <block x="..." y="..." width="..." height="...">`
+
+2. **叶子层映射（child级）**  
+若 `block_j.children` 非空，则对每个 `child_{j,k}` 生成 `<node_{j,k}>`：
+
+$$
+\phi_c(child_{j,k})=\langle id,kind,x,y,width,height,\text{extra}\rangle
+$$
+
+其中 `extra` 由类型决定：
+
+- 文本节点：`content, semantic_level, font_size`
+- 图像节点：`image_path`
+
+3. **无children分支映射**  
+若 `block_j.children` 为空，则 `block_j` 同时承担语义容器与内容节点角色：在 `<block_j>` 内附加 `<text>` 或 `<image>` 子节点，避免内容丢失。
+
+#### （二）XML到“目标元素集合”的映射
+
+为统一生成与评估口径，定义目标元素集合 $T_i$：
+
+$$
+T_i=\bigcup_j
+\begin{cases}
+\{\text{child}_{j,k}\}_k, & \text{if } |children_j|>0 \\
+\{\text{block}_j\}, & \text{if } |children_j|=0
+\end{cases}
+$$
+
+这一定义意味着：
+
+- 在结构理解阶段，XML保留完整层次；
+- 在元素级监督阶段，仅使用“可渲染最小单元”（有children取child，无children取block）。
+
+该机制解释了为何模型提示中同时出现XML与元素数组：XML负责结构，元素数组负责目标元素级检索。
+
+#### （三）目标元素到DOM的映射
+
+对任意目标元素 $t \in T_i$，模型必须在HTML中生成且仅生成一个对应可见DOM元素 $d_t$，满足：
+
+$$
+\psi(t)=d_t,\quad d_t[\text{data-json-id}]=\text{str}(t.id)
+$$
+
+并满足以下强约束：
+
+1. **一对一约束**：同一 `data-json-id` 不得映射多个可见内容节点；  
+2. **内容同位约束**：文本或图片内容必须与 `data-json-id` 位于同一DOM节点；  
+3. **可见性约束**：被映射节点在渲染后需为可见（非 `display:none`、非零尺寸）；  
+4. **不可挪用约束**：装饰节点、纯布局容器不得使用输入元素的 `data-json-id`。
+
+#### （四）字段级映射表
+
+| 输入字段 | XML字段 | DOM约束字段 | 用途 |
+|---|---|---|---|
+| `id` | `block/@id` 或 `node/@id` | `data-json-id` | 元素身份追踪 |
+| `type`/`kind` | `block/@type` 或 `node/@kind` | 标签选择（`div/img/...`） | 渲染语义分派 |
+| `x,y,width,height` | 对应XML几何属性 | 间接体现在最终布局 | 布局对齐参考 |
+| `content` | `node`文本或 `<text>` | 节点文本内容 | 文本保真评估 |
+| `image_path` | `node/@src` 或 `<image src>` | `img[src]` | 图像保真评估 |
+| `semantic_level,font_size` | `node`扩展属性 | 标题/正文层次样式 | 视觉层级控制 |
+
+#### （五）冲突与异常处理策略
+
+在实际数据中可能出现重复id、缺失字段、类型不一致等异常。本文采用以下处理策略以保证映射可执行：
+
+1. `id` 缺失：允许转换为字符串空值用于提示，但在最终DOM阶段仍要求可追踪映射；  
+2. 字段缺失：XML中保留空属性，不进行推断填补；  
+3. 重复id：在评估阶段按 `data-json-id` 匹配时仅计入可见且最合理的对应节点，并在诊断中标记冲突；  
+4. 类型异常：优先保持原值透传，不在转换阶段纠正语义，避免引入人工偏置。
+
+通过上述策略，XML转换不仅是“格式转换”，更是生成-评估闭环中的关键对齐层：它将原始数据语义、提示工程约束和执行期评估指标连接为同一条可验证的映射链路。
+
+### 4.2.3 元素数组转换方法
+
+在XML之外，我们同步构造元素数组：
+
+$$A_i = \mathcal{T}_{arr}(s_i) = [e_1,e_2,\ldots,e_m]$$
+
+元素抽取规则如下：
+
+（1）若某个 `block` 存在 `children`，则该 `block` 不作为独立元素进入数组，仅将其每个 `child` 作为元素加入；
+
+（2）若某个 `block` 不存在 `children`，则该 `block` 自身作为元素加入；
+
+（3）数组顺序与输入遍历顺序一致：先按 `block` 顺序，再按 `children` 顺序。
+
+每个数组元素保留与布局相关的关键字段：`id,kind,x,y,width,height`，并按类型附加 `content` 或 `image_path` 等字段。与XML相比，数组不强调层次关系，而强调元素级检索效率。
+
+### 4.2.4 XML与数组的一致性约束
+
+为避免两种输入视图发生语义漂移，本文引入以下一致性约束：
+
+（1）ID一致性：同一元素在XML与数组中的 `id` 必须一致；
+
+（2）几何一致性：同一元素在两种视图中的 `x,y,width,height` 保持一致；
+
+（3）内容一致性：文本元素的 `content`、图像元素的 `image_path` 在两种视图中保持一致；
+
+（4）集合一致性：用于生成与用于评估的“目标元素集合”定义一致（有children取child，无children取block）。
+
+该一致性设计使得后续 `data-json-id` 映射、DOM覆盖率计算和布局对齐评估具备可追踪的同构关系。
+
+### 4.2.5 提示注入策略
+
+在候选生成提示中，我们采用“XML先行，数组补充”的注入方式：
+
+（1）先给出XML，要求模型先完成结构层次理解；
+
+（2）再给出元素数组，要求模型参考元素级几何信息完成网格/Flex布局决策；
+
+（3）最后给出原始 `blocks` JSON 作为内容边界约束，确保只使用输入文本与图片路径。
+
+这一注入顺序的动机是：先结构、后细节，可降低模型在长上下文中对层次信息的遗失概率，同时保留对几何参数的快速访问能力。
+
+提示中包含以下硬性约束：
 
 （1）画布尺寸约束：幻灯片画布固定为1920px × 1080px，要求在HTML/CSS中显式体现；
 
 （2）布局方式约束：禁止使用 `position:absolute` 或 `position:fixed` 进行内容元素的布局定位，必须优先使用Flexbox与CSS Grid实现布局；
 
-（3）元素映射约束：要求为每个输入元素生成对应的DOM元素，并通过 `data-json-id` 属性建立从DOM元素到输入数据的精确映射关系。
+（3）元素映射约束：要求为每个输入元素生成对应的DOM元素，并通过 `data-json-id` 属性建立从DOM元素到输入数据的精确映射关系；
 
-在采样策略上，本方法采用温度采样（temperature sampling）结合top-p截断的方式。默认温度参数 $\tau = 0.7$，top-p参数 $p = 0.9$。较高的温度设置旨在增加候选集的多样性，使得不同候选在布局策略、配色方案和装饰风格上产生差异，从而为后续的偏好对构建提供充分的对比空间。每个候选的最大生成token数设为4096，以确保能够容纳完整的HTML文档。
+（4）内容一致性约束：输入元素的文本或图片必须出现在带 `data-json-id` 的同一可见DOM元素上，不允许仅在外层容器挂载id而将内容放到无映射的内层；
+
+（5）禁止缺失约束：不允许遗漏任何输入元素，可添加装饰节点，但装饰节点不得占用输入元素的 `data-json-id`。
+
+在采样策略上，本方法采用温度采样（temperature sampling）结合top-p截断的方式。默认温度参数 $\tau = 0.7$，top-p参数 $p = 0.9$。较高的温度设置旨在增加候选集的多样性，使得不同候选在布局策略、配色方案和装饰风格上产生差异，从而为后续的偏好对构建提供充分的对比空间。每个候选的最大生成token数设为4096，以确保能够容纳“XML + 元素数组 + 原始JSON + 输出HTML”的完整上下文。
 
 生成完成后，通过正则表达式从模型输出中提取完整的HTML文档片段。提取逻辑优先匹配 `<!DOCTYPE html>` 声明，其次匹配 `<html` 标签起始位置，最后回退到去除Markdown代码块标记的纯文本。
 

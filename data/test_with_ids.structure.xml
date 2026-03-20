@@ -1,0 +1,36 @@
+<slide id="企业培训 (2)_slide_2" layout_category="multi_column" binary_tree="CLL" full_binary_tree="CLRLRLL">
+  <layout>
+    <region name="region_root" direction="column">
+      <region name="region_left_0" direction="row">
+        <region name="region_right_1" direction="column">
+          <region name="region_left_2" direction="row">
+            <region name="region_right_3" direction="column">
+              <region name="region_left_4" direction="row">
+                <region name="region_left_5" direction="row">
+                  <block id="0" semantic="title">
+                    <children>
+                      <node id="b0_c0" kind="text" semantic_level="0">降低生产成本</node>
+                      <node id="b0_c1" kind="text" semantic_level="0">成本控制实操</node>
+                      <node id="b0_c2" kind="text" semantic_level="0">精益成本管理</node>
+                      <node id="b0_c3" kind="text" semantic_level="0">成本控制体系</node>
+                    </children>
+                  </block>
+                  <block id="1" semantic="mixed">
+                    <children>
+                      <node id="b1_c0" kind="text" semantic_level="2">降低生产成本</node>
+                      <node id="b1_c1" kind="image" src="output/images/slide_2_img_5703393424.png" />
+                      <node id="b1_c2" kind="text" semantic_level="3">单击此处输入你的正文，文字是您思想的提炼，为了最终演示发布的良好效果，请尽量言简意赅的阐述观点；根据需要可酌情增减文字，以便观者可以准确理解您所传达的信息。</node>
+                    </children>
+                  </block>
+                  <block id="2" semantic="text">
+                    <text>01</text>
+                  </block>
+                </region>
+              </region>
+            </region>
+          </region>
+        </region>
+      </region>
+    </region>
+  </layout>
+</slide>

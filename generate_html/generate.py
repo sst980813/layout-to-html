@@ -239,6 +239,103 @@ def _llm_enabled_by_env() -> bool:
     return bool(os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY"))
 
 
+def _blocks_to_flat_elements_json_for_prompt(blocks: List[Dict[str, Any]]) -> str:
+    """
+    将 blocks 转为扁平元素 JSON 数组（用于提示模型理解布局）。
+    规则：
+    - 若 block 有 children：block 不加入，仅展开 children；
+    - 若 block 无 children：输出 block 自身；
+    - 保留原始字段（如 x/y/width/height/kind/content/...）。
+    """
+    elements: List[Dict[str, Any]] = []
+    for b in blocks:
+        children = b.get("children") or []
+        if children:
+            for ch in children:
+                elements.append(dict(ch))
+        else:
+            block_item = {
+                "id": b.get("id"),
+                "kind": b.get("type"),
+                "x": b.get("x"),
+                "y": b.get("y"),
+                "width": b.get("width"),
+                "height": b.get("height"),
+            }
+            if b.get("text_content"):
+                block_item["content"] = b.get("text_content")
+            if b.get("image_path"):
+                block_item["image_path"] = b.get("image_path")
+            elements.append(block_item)
+
+    return json.dumps(elements, ensure_ascii=False)
+
+
+def _blocks_to_structure_xml_for_prompt(blocks: List[Dict[str, Any]]) -> str:
+    """
+    将 blocks 转为结构化 XML（用于提示模型理解层次关系）。
+    - 保留 block/children 层次；
+    - 提供 x/y/width/height 作为几何参考；
+    - 仅用于提示，不作为训练标签。
+    """
+    lines: List[str] = []
+    lines.append("<layout_reference>")
+    lines.append('  <canvas width="1920" height="1080" />')
+    lines.append("  <blocks>")
+
+    for b in blocks:
+        block_id = html.escape(str(b.get("id", "")))
+        block_type = html.escape(str(b.get("type", "")))
+        x = html.escape(str(b.get("x", "")))
+        y = html.escape(str(b.get("y", "")))
+        w = html.escape(str(b.get("width", "")))
+        h = html.escape(str(b.get("height", "")))
+        lines.append(
+            f'    <block id="{block_id}" type="{block_type}" x="{x}" y="{y}" width="{w}" height="{h}">'
+        )
+
+        children = b.get("children") or []
+        if children:
+            lines.append("      <children>")
+            for ch in children:
+                cid = html.escape(str(ch.get("id", "")))
+                kind = html.escape(str(ch.get("kind", "")))
+                cx = html.escape(str(ch.get("x", "")))
+                cy = html.escape(str(ch.get("y", "")))
+                cw = html.escape(str(ch.get("width", "")))
+                chh = html.escape(str(ch.get("height", "")))
+                if kind == "text":
+                    txt = html.escape(str(ch.get("content", "")))
+                    sem = html.escape(str(ch.get("semantic_level", "")))
+                    fs = html.escape(str(ch.get("font_size", "")))
+                    lines.append(
+                        f'        <node id="{cid}" kind="{kind}" x="{cx}" y="{cy}" width="{cw}" height="{chh}" semantic_level="{sem}" font_size="{fs}">{txt}</node>'
+                    )
+                elif kind == "image":
+                    src = html.escape(str(ch.get("image_path", "")))
+                    lines.append(
+                        f'        <node id="{cid}" kind="{kind}" x="{cx}" y="{cy}" width="{cw}" height="{chh}" src="{src}" />'
+                    )
+                else:
+                    lines.append(
+                        f'        <node id="{cid}" kind="{kind}" x="{cx}" y="{cy}" width="{cw}" height="{chh}" />'
+                    )
+            lines.append("      </children>")
+        else:
+            text_content = html.escape(str(b.get("text_content", "")))
+            img_path = html.escape(str(b.get("image_path", "")))
+            if text_content:
+                lines.append(f"      <text>{text_content}</text>")
+            if img_path:
+                lines.append(f'      <image src="{img_path}" />')
+
+        lines.append("    </block>")
+
+    lines.append("  </blocks>")
+    lines.append("</layout_reference>")
+    return "\n".join(lines)
+
+
 def _openai_rewrite_html(blocks: List[Dict[str, Any]], *, stream_to_stdout: bool = True) -> Optional[str]:
     """
     可选：用大模型在“只使用 blocks 内容”的前提下生成 HTML。
@@ -263,22 +360,19 @@ def _openai_rewrite_html(blocks: List[Dict[str, Any]], *, stream_to_stdout: bool
         "硬性约束：必须保留并可追踪输入数据的元素级 id 映射（见用户指令的“ID 映射规则”）。"
         "输出必须是一个完整可直接保存为 .html 的文档源码；不要输出 Markdown；不要解释。"
     )
+    flat_elements_json = _blocks_to_flat_elements_json_for_prompt(blocks)
+    structure_xml = _blocks_to_structure_xml_for_prompt(blocks)
     user = textwrap.dedent(
         f"""
         按以下“4 步流程”生成最终 HTML（最终输出只包含 HTML 源码本身）：
 
-        第一步：感知布局结构（必须输出到 HTML 文件头部注释里）
-        - 你需要对 blocks 内所有元素坐标进行空间关系分析：上下/左右关系、同一行/同一列、整体布局模式（单列/多列/网格/混合）、对齐方式、间距规律、视觉层次主次。
-        - 把分析结果写成 HTML 注释，放在 <head> 里，格式为：
-          <!--
-          Step1 布局结构分析:
-          - Layout pattern: ...
-          - Rows/Cols grouping: ...
-          - Alignment: ...
-          - Spacing: ...
-          - Visual hierarchy: ...
-          -->
-        - 这里是“可解释性摘要”，不要输出冗长推理过程。
+        第一步：基于“结构 XML + 扁平元素数组”进行布局规划（无需输出分析注释）
+        - 你会同时收到结构 XML（用于理解层次关系）和扁平元素 JSON 数组（用于快速读取关键几何要素）。
+        - 你会收到一个扁平元素 JSON 数组（非树形），数组中每一项对应一个输入元素。
+        - 若原 block 有 children，则 block 本身不进入数组，仅将 children 的每个元素作为独立数组项。
+        - 若 block 无 children，则该 block 本身进入数组。
+        - 数组中包含 x/y/width/height，可作为布局参考；你需要综合这些信息决定整体布局（单列/多列/网格/混合）以及局部元素排布方式。
+        - 不要在最终 HTML 中输出“步骤分析”注释，直接给出实现后的代码。
 
         第二步：用现代布局方式实现（禁止 absolute 硬编码）
         - 不允许对内容元素使用 position:absolute/fixed 做布局定位。
@@ -308,14 +402,19 @@ def _openai_rewrite_html(blocks: List[Dict[str, Any]], *, stream_to_stdout: bool
         - 图片可加彩色边框与轻量滤镜（如 saturate/contrast），但不得改动图片内容。
         - 文字区域可加入图标icon增加丰富度。
 
-        输入数据（只能使用这些数据的文本与 image_path）：
-        {json.dumps(blocks, ensure_ascii=False)}
+        结构 XML（用于层次结构推断）：
+        {structure_xml}
+
+        扁平元素数组（用于布局推断）：
+        {flat_elements_json}
 
         请直接输出最终 HTML 文档源码。
         """
     ).strip()
 
     content_parts: List[str] = []
+
+    print(user)
     if stream_to_stdout:
         stream = llm_client.chat.completions.create(
             model=model,
